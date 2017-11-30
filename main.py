@@ -1,87 +1,120 @@
-# -*- coding: utf8 -*-
-import time
-from socket import *
-from select import *
-from multiprocessing import Process
+import SocketServer
+import socket
 
-import requests
+def getHost(data):
 
-
-def get_fake_request():
-    return """GET /dhafiosdfhasodufhasdiuyfgaisudyf HTTP/1.1
-Host: cykorr.krr"""
+    hostIdx = data.find("Host: ")
+    if hostIdx == -1:
+        return 0
+    host = data[hostIdx:].split("\r\n",1)[0]
+    return host[6:]
 
 
-def handle_proxy(data, fd):
-    print data
-    try:
-        request, headers = data.split('\n', 1)
-    except ValueError:
-        return
-
-    method, url, protocol = request.split(' ')
-    schema, host = url.split('://')
-
-    print repr(method)
-    if method != 'GET':
-        request = getattr(requests, method.lower(), None)
-        if request is None:
-            return
-        try:
-            r = request(url)
-        except Exception:
-            return
-        return fd.send(r.content)
-
-    req = get_fake_request() + '\n\n' + data
-
-    proxy_sock = socket(AF_INET, SOCK_STREAM)
-    proxy_sock.connect((host.strip('/'), 80))
-    proxy_sock.send(req)
-
-    res = receive_all(proxy_sock)
-    ok_idx = res.find('200 OK\r\n') - 9
-    print res[ok_idx:]
-    fd.send(res[ok_idx:])
-
-
-def receive_all(s):
-    data = ''
+def ru(s, v):
+    t = ''
     while True:
-        rc = s.recv(1024)
-        if not rc:
-            break
-        data += rc
-    return data
+        m = s.recv(1)
+        if len(m) == 0:
+            return 0
+        t += m
+        if v in t:
+            return t
 
 
-socks = []
-server = socket(AF_INET, SOCK_STREAM)
-server.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-server.bind(('127.0.0.1', 8080))
-server.listen(10)
-socks.append(server)
-
-while True:
-    try:
-        read_fds, write_fds, except_fds = select(socks, [], [])
-    except KeyboardInterrupt:
-        break
-
-    for read_fd in read_fds:#zip(read_fds, write_fds):
-        if read_fd == server:
-            client, _ = server.accept()
-            socks.append(client)
+def getContentLength(data):
+    idx = data.find("Content-Length")
+    if idx == -1:
+        idx2 = data.find("Transfer-Encoding: chunked")
+        if idx2 == -1:
+            return -1
         else:
-            data = receive_all(read_fd)
-            if data:
-                print data
-                Process(target=handle_proxy, args=(data, read_fd)).start()
-            else:
-                read_fd.close()
-                #write_fd.close()
-                socks.remove(read_fd)
-                #socks.remove(write_fd)
-    time.sleep(0.5)
+            return -2
+    return int(data[idx+16:].split("\r\n",1)[0])
 
-server.close()
+
+def rn(s, n):
+    b=""
+    while len(b) < n:
+        b += s.recv(1)
+
+    return b
+
+
+def rc(s, header):
+    cl = getContentLength(header)
+    if cl == -2:
+        res = ""
+        while True:
+            cl = ru(s, '\r\n\r\n')[:-4]
+            print "CL1: "+repr(cl)
+            cl = int(cl, 16)
+            print "CL2: "+hex(cl)
+            if cl == 0:
+                return res
+            res += rn(s, cl)
+            print "NOW: "+repr(res)
+    elif cl == -1:
+        return ""
+    else:
+        return rn(s, cl)
+
+
+fakePayload = "Get http://google.com/ HTTP/1.1\r\nHost: google.com\r\n\r\n"
+
+
+class MyTCPHandler(SocketServer.BaseRequestHandler):
+
+    def handle(self):
+
+        data = ru(self.request, '\r\n\r\n')
+        if data == 0:
+            print "Something Wrong!!"
+            return
+
+        print data
+        host = getHost(data)
+        if not host:
+            print "Something Wrong!!"
+            return
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        print "Connecting %s:%d" % (host, 80)
+        s.connect((host, 80))
+        s.send(fakePayload + data)
+
+        print "GOOD"
+
+        firstHeader = ru(s, '\r\n\r\n')
+        print "First Header: "+repr(firstHeader)
+        content = rc(s, firstHeader)
+        print "First Content: "+repr(content)
+        secondHeader = ru(s, '\r\n\r\n')
+        print "Second Header: "+repr(secondHeader)
+        content = rc(s, secondHeader)
+        print "Second Content: "+repr(content)
+
+        # rn(s, cl)
+        #
+        # res = ru(s, '\r\n\r\n')
+        # print repr(res)
+        # cl = getContentLength(res)
+        # if cl == -2:
+        #     tmp = ru(s, '\r\n\r\n\r\n')
+        #     repr(tmp)
+        #     cl = int(tmp[:-3], 16)
+        # elif cl == -1:
+        #     cl = 0
+        # res += rn(s, cl)
+        #
+        # print repr(res)
+        self.request.sendall(secondHeader + content)
+
+if __name__ == "__main__":
+    HOST, PORT = "localhost", 8080
+
+    # Create the server, binding to localhost on port 9999
+    server = SocketServer.TCPServer((HOST, PORT), MyTCPHandler)
+
+    # Activate the server; this will keep running until you
+    # interrupt the program with Ctrl-C
+    server.serve_forever()
